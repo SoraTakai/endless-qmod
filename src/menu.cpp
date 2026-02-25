@@ -162,7 +162,7 @@ namespace endless {
 			}));
 
 			// difficulty
-			std::vector<std::string_view> difficulties{"Easy", "Normal", "Hard", "Expert", "Expert+"};
+      std::vector<std::string_view> difficulties{"Any", "Easy", "Normal", "Hard", "Expert", "Expert+"};
 			tab_add_parent(automatic_tab, BSML::Lite::CreateDropdown(container->transform, "Difficulty", getModConfig().difficulty.GetValue(), difficulties, [](StringW string) {
 				getModConfig().difficulty.SetValue(string);
 			}));
@@ -174,7 +174,8 @@ namespace endless {
 					continue; // don't want that one
 				characteristics.push_back(characteristic->_serializedName);
 			}
-			std::vector<std::string_view> characteristics_views{characteristics.begin(), characteristics.end()};
+      std::vector<std::string_view> characteristics_views{"Any"};
+      characteristics_views.insert(characteristics_views.end(), characteristics.begin(), characteristics.end());
 			tab_add_parent(automatic_tab, BSML::Lite::CreateDropdown(container->transform, "Characteristic", getModConfig().characteristic.GetValue(), characteristics_views, [](StringW string) {
 				getModConfig().characteristic.SetValue(string);
 			}));

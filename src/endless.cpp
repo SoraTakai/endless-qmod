@@ -389,21 +389,23 @@ namespace endless {
     bool has_chroma = false;
     if(custom_level != nullptr) {
       auto csdi = custom_level->CustomSaveDataInfo;
-      auto bcdbd = csdi->get().TryGetCharacteristicAndDifficulty(level_params.characteristic->_serializedName, level_params.difficulty);
-      if(bcdbd != std::nullopt) {
-        for(std::string requirement : bcdbd.value().get().requirements) {
-          if(!SongCore::API::Capabilities::IsCapabilityRegistered(requirement))
-            return false;
-          if(requirement == "Noodle Extensions")
-            has_noodle = true;
-          else if(requirement == "Chroma")
-            has_chroma = true;
-        }
-        for(std::string suggestion : bcdbd.value().get().suggestions) {
-          if(suggestion == "Noodle Extensions")
-            has_noodle = true;
-          else if(suggestion == "Chroma")
-            has_chroma = true;
+      if(csdi.has_value()) {
+        auto bcdbd = csdi->get().TryGetCharacteristicAndDifficulty(level_params.characteristic->_serializedName, level_params.difficulty);
+        if(bcdbd != std::nullopt) {
+          for(std::string requirement : bcdbd.value().get().requirements) {
+            if(!SongCore::API::Capabilities::IsCapabilityRegistered(requirement))
+              return false;
+            if(requirement == "Noodle Extensions")
+              has_noodle = true;
+            else if(requirement == "Chroma")
+              has_chroma = true;
+          }
+          for(std::string suggestion : bcdbd.value().get().suggestions) {
+            if(suggestion == "Noodle Extensions")
+              has_noodle = true;
+            else if(suggestion == "Chroma")
+              has_chroma = true;
+          }
         }
       }
     }

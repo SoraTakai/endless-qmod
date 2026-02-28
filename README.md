@@ -16,6 +16,9 @@ This fork keeps the original goal, but makes playlist playback more complete and
 - Added broader difficulty canonicalization for playlist metadata:
   - Text labels (`Easy`, `Normal`, `Hard`, `Expert`, `Expert+`/`ExpertPlus`).
   - Numeric canonical values (`0..4`).
+- Endless settings now persist and restore across app restarts:
+  - Saves the selected playlist/playset and current Endless config when `Start!` is pressed.
+  - Restores those values when the Endless menu is opened again.
 
 ## What Endless Does
 

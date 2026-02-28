@@ -61,6 +61,26 @@ namespace endless {
 	PlaylistCore::Playlist *selected_playlist = nullptr;
 	int selected_playset = -1;
 
+  static bool set_selected_playlist_by_name(std::string const& playlist_name, bool save, bool normalize_missing) {
+    selected_playlist = nullptr;
+    if(playlist_name == "All") {
+      if(save)
+        getModConfig().selected_playlist.SetValue("All");
+      return true;
+    }
+    for(PlaylistCore::Playlist *playlist : PlaylistCore::GetLoadedPlaylists()) {
+      if(playlist->name != playlist_name)
+        continue;
+      selected_playlist = playlist;
+      if(save)
+        getModConfig().selected_playlist.SetValue(playlist_name);
+      return true;
+    }
+    if(save)
+      getModConfig().selected_playlist.SetValue(normalize_missing && PlaylistCore::hasLoaded ? "All" : playlist_name);
+    return false;
+  }
+
 	void register_menu_hooks(void) {
 		INSTALL_HOOK(PaperLogger, LevelCollectionNavigationController_HandleLevelCollectionViewControllerDidSelectLevel);
 		INSTALL_HOOK(PaperLogger, LevelCollectionNavigationController_HandleLevelDetailViewControllerDidChangeDifficultyBeatmap);
@@ -143,23 +163,40 @@ namespace endless {
 		});
 		// automatic
 		{
-			// playlist
-			std::vector<std::string_view> playlist_names = {"All"};
-			std::vector<PlaylistCore::Playlist *> playlists = PlaylistCore::GetLoadedPlaylists();
-			for(PlaylistCore::Playlist *playlist : playlists) {
-				playlist_names.push_back(playlist->name);
-			}
+      // playlist
+      std::string selected_playlist_name = getModConfig().selected_playlist.GetValue();
+      set_selected_playlist_by_name(selected_playlist_name, false, false);
+      PaperLogger.info("Restoring playlist setting '{}'...", selected_playlist_name);
+      auto playlist_dropdown_ready = std::make_shared<bool>(false);
+      std::vector<std::string_view> playlist_names = {"All"};
+      auto playlist_dropdown = tab_add_parent(automatic_tab, BSML::Lite::CreateDropdown(container->transform, "Playlist", "All", playlist_names, [playlist_dropdown_ready](StringW string) {
+        std::string playlist_name = static_cast<std::string>(string);
+        if(*playlist_dropdown_ready)
+          set_selected_playlist_by_name(playlist_name, true, false);
+        else
+          set_selected_playlist_by_name(playlist_name, false, false);
+      }));
+      int selected_playlist_index = 0;
+      std::vector<std::string> loaded_playlist_names = {"All"};
+      for(PlaylistCore::Playlist *playlist : PlaylistCore::GetLoadedPlaylists()) {
+        loaded_playlist_names.push_back(playlist->name);
+        if(playlist->name == selected_playlist_name)
+          selected_playlist_index = loaded_playlist_names.size()-1;
+      }
+      if(selected_playlist_name != "All" && selected_playlist_index == 0) {
+        loaded_playlist_names.push_back(selected_playlist_name);
+        selected_playlist_index = loaded_playlist_names.size()-1;
+      }
+      auto loaded_playlist_names_shared = std::make_shared<std::vector<std::string>>(loaded_playlist_names);
+      auto playlist_list = ListW<System::Object *>::New();
+      playlist_list->EnsureCapacity(loaded_playlist_names.size());
+      for(auto const& playlist_name : loaded_playlist_names)
+        playlist_list->Add(static_cast<System::Object *>(StringW(playlist_name).convert()));
+      playlist_dropdown->values = playlist_list;
+      playlist_dropdown->UpdateChoices();
+      playlist_dropdown->dropdown->SelectCellWithIdx(selected_playlist_index);
+      *playlist_dropdown_ready = true;
 			// this could break if playlists are updated while in-game. FIXME
-			tab_add_parent(automatic_tab, BSML::Lite::CreateDropdown(container->transform, "Playlist", "All", playlist_names, [playlists](StringW string) {
-				selected_playlist = nullptr;
-				if(string == "All")
-					return;
-				for(PlaylistCore::Playlist *playlist : playlists) {
-					if(playlist->name != string)
-						continue;
-					selected_playlist = playlist;
-				}
-			}));
 
 			// difficulty
       std::vector<std::string_view> difficulties{"Any", "Easy", "Normal", "Hard", "Expert", "Expert+"};
@@ -189,8 +226,14 @@ namespace endless {
 				getModConfig().chroma.SetValue(string);
 			}));
 
-			// start button
-			tab_add(automatic_tab, BSML::Lite::CreateUIButton(container->transform, "Start!", []() {
+      // start button
+      tab_add(automatic_tab, BSML::Lite::CreateUIButton(container->transform, "Start!", [playlist_dropdown, loaded_playlist_names_shared]() {
+        int selected_index = playlist_dropdown->dropdown->get_selectedIndex();
+        if(selected_index < 0 || selected_index >= loaded_playlist_names_shared->size())
+          selected_index = 0;
+        std::string playlist_name = (*loaded_playlist_names_shared)[selected_index];
+        PaperLogger.info("Saving playlist setting '{}' before start.", playlist_name);
+        set_selected_playlist_by_name(playlist_name, true, true);
 				calculate_levels(true);
 				start_endless();
 			}));
@@ -236,29 +279,50 @@ namespace endless {
 				}));
 			};
 			std::vector<std::string_view> playset_names = {"<None>"};
-			auto playset_dropdown = tab_add_parent(playset_tab, BSML::Lite::CreateDropdown(container->transform, "Playset", "<None>", playset_names, [=](StringW string) {
-				selected_playset = -1;
-				auto playsets = getModConfig().playsets.GetValue();
-				for(int i = 0; i < playsets.size(); i++) {
-					if(playsets[i].name != string)
-						continue;
-					selected_playset = i;
-					break;
-				}
-				for(auto go : *level_bars)
-					UnityEngine::Object::Destroy(go);
-				level_bars->clear();
-				tab_set_visible(playset_tab_extra, selected_playset != -1);
-				if(selected_playset == -1)
-					return;
-				for(auto psb : playsets[selected_playset].beatmaps) {
-					auto params = LevelParams::from_playset_beatmap(psb);
-					if(!params.has_value()) {
-						continue;
-					}
-					add_level_bar(params.value());
-				}
-			}));
+      auto find_playset_index = [](std::vector<Playset> const& playsets, std::string const& playset_name) {
+        for(int i = 0; i < playsets.size(); i++) {
+          if(playsets[i].name == playset_name)
+            return i;
+        }
+        return -1;
+      };
+      auto suppress_playset_dropdown_callback = std::make_shared<bool>(false);
+      auto apply_playset_selection = [=](std::string const& playset_name, bool save) {
+        auto playsets = getModConfig().playsets.GetValue();
+        selected_playset = find_playset_index(playsets, playset_name);
+        for(auto go : *level_bars)
+          UnityEngine::Object::Destroy(go);
+        level_bars->clear();
+        tab_set_visible(playset_tab_extra, selected_playset != -1);
+        if(selected_playset == -1) {
+          if(save)
+            getModConfig().selected_playset.SetValue("<None>");
+          return;
+        }
+        if(save)
+          getModConfig().selected_playset.SetValue(playsets[selected_playset].name);
+        for(auto psb : playsets[selected_playset].beatmaps) {
+          auto params = LevelParams::from_playset_beatmap(psb);
+          if(!params.has_value()) {
+            continue;
+          }
+          add_level_bar(params.value());
+        }
+      };
+      std::string selected_playset_name = getModConfig().selected_playset.GetValue();
+      auto playsets = getModConfig().playsets.GetValue();
+      selected_playset = find_playset_index(playsets, selected_playset_name);
+      if(selected_playset == -1) {
+        selected_playset_name = "<None>";
+        getModConfig().selected_playset.SetValue(selected_playset_name);
+      } else {
+        selected_playset_name = playsets[selected_playset].name;
+      }
+      auto playset_dropdown = tab_add_parent(playset_tab, BSML::Lite::CreateDropdown(container->transform, "Playset", "<None>", playset_names, [apply_playset_selection, suppress_playset_dropdown_callback](StringW string) {
+        if(*suppress_playset_dropdown_callback)
+          return;
+        apply_playset_selection(static_cast<std::string>(string), true);
+      }));
 			#define UPDATE_PLAYSET_DROPDOWN() do { \
 				std::vector<std::string> _playsets = {"<None>"}; \
 				for(Playset playset : getModConfig().playsets.GetValue()) { \
@@ -271,9 +335,13 @@ namespace endless {
 				} \
 				playset_dropdown->values = list; \
 				playset_dropdown->UpdateChoices(); \
-			} while(0)
-			UPDATE_PLAYSET_DROPDOWN();
-			auto new_playset_name = tab_add(playset_tab, BSML::Lite::CreateStringSetting(container->transform, "New Playset Name", ""));
+      } while(0)
+      UPDATE_PLAYSET_DROPDOWN();
+      *suppress_playset_dropdown_callback = true;
+      playset_dropdown->dropdown->SelectCellWithIdx(selected_playset == -1 ? 0 : selected_playset+1);
+      *suppress_playset_dropdown_callback = false;
+      apply_playset_selection(selected_playset_name, false);
+      auto new_playset_name = tab_add(playset_tab, BSML::Lite::CreateStringSetting(container->transform, "New Playset Name", ""));
 			auto hgroup = tab_add(playset_tab, BSML::Lite::CreateHorizontalLayoutGroup(container->transform));
 			BSML::Lite::CreateUIButton(hgroup->transform, "Create New Playset", [=]() {
 				std::string name = new_playset_name->text;
@@ -288,29 +356,26 @@ namespace endless {
 				auto playsets = getModConfig().playsets.GetValue();
 				Playset playset;
 				playset.name = name;
-				playsets.push_back(playset);
-				getModConfig().playsets.SetValue(playsets);
-				UPDATE_PLAYSET_DROPDOWN();
-				selected_playset = playsets.size()-1;
-				playset_dropdown->dropdown->SelectCellWithIdx(playsets.size());
-				tab_set_visible(playset_tab_extra, true);
-				for(auto go : *level_bars)
-					UnityEngine::Object::Destroy(go);
-				level_bars->clear();
-			});
+          playsets.push_back(playset);
+          getModConfig().playsets.SetValue(playsets);
+          UPDATE_PLAYSET_DROPDOWN();
+          *suppress_playset_dropdown_callback = true;
+          playset_dropdown->dropdown->SelectCellWithIdx(playsets.size());
+          *suppress_playset_dropdown_callback = false;
+        apply_playset_selection(name, true);
+        });
 			tab_add(playset_tab_extra, BSML::Lite::CreateUIButton(hgroup->transform, "Delete Playset", [=]() {
 				if(selected_playset == -1)
 					return;
 				auto playsets = getModConfig().playsets.GetValue();
-				playsets.erase(playsets.begin() + selected_playset); // nope, can't just have a remove_at() function, need to do this bullshit. istg C++ is like if they _tried_ to make the stupidest fucking language ever.
-				getModConfig().playsets.SetValue(playsets);
-				UPDATE_PLAYSET_DROPDOWN();
-				playset_dropdown->dropdown->SelectCellWithIdx(0);
-				tab_set_visible(playset_tab_extra, false);
-				for(auto go : *level_bars)
-					UnityEngine::Object::Destroy(go);
-				level_bars->clear();
-			}));
+          playsets.erase(playsets.begin() + selected_playset); // nope, can't just have a remove_at() function, need to do this bullshit. istg C++ is like if they _tried_ to make the stupidest fucking language ever.
+          getModConfig().playsets.SetValue(playsets);
+          UPDATE_PLAYSET_DROPDOWN();
+          *suppress_playset_dropdown_callback = true;
+          playset_dropdown->dropdown->SelectCellWithIdx(0);
+          *suppress_playset_dropdown_callback = false;
+        apply_playset_selection("<None>", true);
+        }));
 			// start button
 			tab_add(playset_tab_extra, BSML::Lite::CreateUIButton(hgroup->transform, "Start!", []() {
 				calculate_levels(false);
@@ -341,5 +406,6 @@ namespace endless {
 		}
 		tab_set_visible(playset_tab, false);
 		tab_set_visible(playset_tab_extra, false);
+    tab_set_visible(level_bars, false);
 	}
 }

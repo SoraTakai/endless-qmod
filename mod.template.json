@@ -4,7 +4,7 @@
   "name": "${mod_name}",
   "id": "${mod_id}",
   "author": "TheZipCreator",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "packageId": "com.beatgames.beatsaber",
   "packageVersion": "1.37.0_9064817954",
   "description": "Allows you to play endlessly, or at least until you fail.",

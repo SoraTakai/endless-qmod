@@ -5,7 +5,7 @@
   "info": {
     "name": "Endless",
     "id": "endless",
-    "version": "0.4.0",
+    "version": "0.4.1",
     "url": null,
     "additionalData": {
       "overrideSoName": "libendless.so",

@@ -234,13 +234,12 @@ namespace endless {
         std::string playlist_name = (*loaded_playlist_names_shared)[selected_index];
         PaperLogger.info("Saving playlist setting '{}' before start.", playlist_name);
         set_selected_playlist_by_name(playlist_name, true, true);
-				calculate_levels(true);
-				start_endless();
-			}));
-		}
-		// playset
-		{
-			auto add_level_bar = [=](LevelParams params) {
+        start_endless_from_menu(true);
+      }));
+    }
+    // playset
+    {
+      auto add_level_bar = [=](LevelParams params) {
 				auto level_bar = tab_add(level_bars, create_level_bar(container->transform, params));
 				tab_add(level_bars, BSML::Lite::CreateUIButton(container->transform, "Remove", [=]() {
 					auto playsets = getModConfig().playsets.GetValue();
@@ -376,16 +375,15 @@ namespace endless {
           *suppress_playset_dropdown_callback = false;
         apply_playset_selection("<None>", true);
         }));
-			// start button
-			tab_add(playset_tab_extra, BSML::Lite::CreateUIButton(hgroup->transform, "Start!", []() {
-				calculate_levels(false);
-				start_endless();
-			}));	
-			std::string playset_text = "--- Levels in this playset ---\nTo add levels, first select the level you want to add (as if you were\nabout to play it). Then, press the button below to add it to the playset.";
-			tab_add(playset_tab_extra, BSML::Lite::CreateText(container->transform, playset_text, TMPro::FontStyles::Normal, {0, 0}, {0, 16}));
-			tab_add(playset_tab_extra, BSML::Lite::CreateUIButton(container->transform, "Add Level to Playset", [=]() {
-				if(selected_playset != -1 && selected_level) {
-					auto level = selected_level.value();
+      // start button
+      tab_add(playset_tab_extra, BSML::Lite::CreateUIButton(hgroup->transform, "Start!", []() {
+        start_endless_from_menu(false);
+      }));
+      std::string playset_text = "--- Levels in this playset ---\nTo add levels, first select the level you want to add (as if you were\nabout to play it). Then, press the button below to add it to the playset.";
+      tab_add(playset_tab_extra, BSML::Lite::CreateText(container->transform, playset_text, TMPro::FontStyles::Normal, {0, 0}, {0, 16}));
+      tab_add(playset_tab_extra, BSML::Lite::CreateUIButton(container->transform, "Add Level to Playset", [=]() {
+        if(selected_playset != -1 && selected_level) {
+          auto level = selected_level.value();
 					auto playsets = getModConfig().playsets.GetValue();
 					auto beatmaps = &playsets[selected_playset].beatmaps;
 					// make sure that the selected_level is not already in beatmaps

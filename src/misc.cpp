@@ -137,9 +137,9 @@ namespace endless {
 		PaperLogger.info("Level started.");
 		return true;
 	}
-	const std::vector<std::string> incompatible_mods = {"Replay"};
-	std::vector<std::string> enabled_incompatible_mods = {};
-	void check_for_incompatible_mods(void) {
+    const std::vector<std::string> incompatible_mods = {"Replay"};
+    std::vector<std::string> enabled_incompatible_mods = {};
+    void check_for_incompatible_mods(void) {
 		enabled_incompatible_mods.clear();
 		for(auto &mod_result : modloader::get_all()) {
 			if(auto mod_info = std::get_if<modloader::ModData>(&mod_result)) {
@@ -154,20 +154,25 @@ namespace endless {
 			}
 			continue_outer:;
 		}
-	}
-	GlobalNamespace::BeatmapLevel *get_beatmap(std::string id) {
-		// try builtin levels
-		auto bmlm = UnityEngine::Resources::FindObjectsOfTypeAll<GlobalNamespace::MainFlowCoordinator *>()[0]->_beatmapLevelsModel;
-		RETURN_IF_NULL(bmlm, nullptr);
-		auto level = bmlm->GetBeatmapLevel(id);
-		if(level != nullptr)
-			return level;
-		// try songcore
-		level = static_cast<GlobalNamespace::BeatmapLevel *>(SongCore::API::Loading::GetLevelByLevelID(id));
-		if(level != nullptr)
-			return level;
-		return nullptr;
-	}
+    }
+    static GlobalNamespace::BeatmapLevelsModel *get_beatmap_levels_model(void) {
+      auto mfcs = UnityEngine::Resources::FindObjectsOfTypeAll<GlobalNamespace::MainFlowCoordinator *>();
+      if(mfcs.size() == 0)
+        return nullptr;
+      return mfcs[0]->_beatmapLevelsModel;
+    }
+    GlobalNamespace::BeatmapLevel *get_beatmap(std::string id) {
+      // try builtin levels
+      auto bmlm = get_beatmap_levels_model();
+      auto level = bmlm == nullptr ? nullptr : bmlm->GetBeatmapLevel(id);
+      if(level != nullptr)
+        return level;
+      // try songcore
+      level = static_cast<GlobalNamespace::BeatmapLevel *>(SongCore::API::Loading::GetLevelByLevelID(id));
+      if(level != nullptr)
+        return level;
+      return nullptr;
+    }
 	GlobalNamespace::LevelBar *create_level_bar(UnityEngine::Transform *parent, LevelParams params) {
 		auto level_bar = UnityEngine::Object::Instantiate(UnityEngine::Resources::FindObjectsOfTypeAll<GlobalNamespace::ResultsViewController *>()[0]->_levelBar, parent);
 		level_bar->hide = false;

@@ -2,6 +2,7 @@
 #include <cctype>
 #include <vector>
 #include <random>
+#include <unordered_map>
 
 #include "UnityEngine/Object.hpp"
 
@@ -173,6 +174,19 @@ MAKE_HOOK_MATCH(ResultsViewController_SetDataToUI, &GlobalNamespace::ResultsView
 namespace endless {
 	State state;
 
+  static std::mt19937& get_random_engine() {
+    static std::mt19937 engine(std::random_device { }());
+    return engine;
+  }
+
+  static bool mod_allow_state_matches(bool has_mod, std::string const& allow_state) {
+    if(allow_state == "Forbidden")
+      return !has_mod;
+    if(allow_state == "Required")
+      return has_mod;
+    return true;
+  }
+
   struct PlaylistSongDifficultyInfo {
     GlobalNamespace::BeatmapDifficulty difficulty;
     std::string characteristic;
@@ -284,21 +298,44 @@ namespace endless {
     return "";
   }
 
-  static PlaylistCore::BPSong *find_playlist_song_for_level(PlaylistCore::Playlist *playlist, GlobalNamespace::BeatmapLevel *level) {
-    if(playlist == nullptr || level == nullptr)
-      return nullptr;
-    auto level_id = normalize_level_id(static_cast<std::string>(level->levelID));
-    for(auto &song : playlist->playlistJSON.Songs) {
-      if(normalize_level_id(song.LevelID) == level_id)
-        return &song;
-    }
-    return nullptr;
+  static std::unordered_map<std::string, PlaylistCore::BPSong *> build_playlist_song_lookup(PlaylistCore::Playlist *playlist) {
+    std::unordered_map<std::string, PlaylistCore::BPSong *> lookup;
+    if(playlist == nullptr)
+      return lookup;
+    lookup.reserve(playlist->playlistJSON.Songs.size());
+    for(auto &song : playlist->playlistJSON.Songs)
+      lookup[normalize_level_id(song.LevelID)] = &song;
+    return lookup;
   }
 
-  static GlobalNamespace::BeatmapCharacteristicSO *get_default_characteristic_for_level(GlobalNamespace::BeatmapLevel *level, std::vector<GlobalNamespace::BeatmapCharacteristicSO *> const& characteristics) {
-    auto standard = get_characteristic("Standard");
-    if(level_has_characteristic(level, standard))
-      return standard;
+  static PlaylistCore::BPSong *find_playlist_song_for_level(std::unordered_map<std::string, PlaylistCore::BPSong *> const& playlist_song_lookup, GlobalNamespace::BeatmapLevel *level) {
+    if(level == nullptr)
+      return nullptr;
+    auto it = playlist_song_lookup.find(normalize_level_id(static_cast<std::string>(level->levelID)));
+    return it == playlist_song_lookup.end() ? nullptr : it->second;
+  }
+
+  static std::unordered_map<std::string, GlobalNamespace::BeatmapCharacteristicSO *> build_characteristic_lookup(std::vector<GlobalNamespace::BeatmapCharacteristicSO *> const& characteristics) {
+    std::unordered_map<std::string, GlobalNamespace::BeatmapCharacteristicSO *> lookup;
+    lookup.reserve(characteristics.size());
+    for(auto characteristic : characteristics) {
+      if(characteristic == nullptr || characteristic->_serializedName == "MissingCharacteristic")
+        continue;
+      lookup[characteristic->_serializedName] = characteristic;
+    }
+    return lookup;
+  }
+
+  static GlobalNamespace::BeatmapCharacteristicSO *find_characteristic_from_lookup(std::unordered_map<std::string, GlobalNamespace::BeatmapCharacteristicSO *> const& characteristic_lookup, std::string const& name) {
+    auto it = characteristic_lookup.find(name);
+    if(it == characteristic_lookup.end())
+      return nullptr;
+    return it->second;
+  }
+
+  static GlobalNamespace::BeatmapCharacteristicSO *get_default_characteristic_for_level(GlobalNamespace::BeatmapLevel *level, GlobalNamespace::BeatmapCharacteristicSO *standard_characteristic, std::vector<GlobalNamespace::BeatmapCharacteristicSO *> const& characteristics) {
+    if(level_has_characteristic(level, standard_characteristic))
+      return standard_characteristic;
     for(auto characteristic : characteristics) {
       if(characteristic == nullptr || characteristic->_serializedName == "MissingCharacteristic")
         continue;
@@ -308,10 +345,10 @@ namespace endless {
     return nullptr;
   }
 
-  static GlobalNamespace::BeatmapCharacteristicSO *get_valid_characteristic_for_level(GlobalNamespace::BeatmapLevel *level, std::string value) {
+  static GlobalNamespace::BeatmapCharacteristicSO *get_valid_characteristic_for_level(GlobalNamespace::BeatmapLevel *level, std::unordered_map<std::string, GlobalNamespace::BeatmapCharacteristicSO *> const& characteristic_lookup, std::string const& value) {
     if(value.empty())
       return nullptr;
-    auto characteristic = get_characteristic(value);
+    auto characteristic = find_characteristic_from_lookup(characteristic_lookup, value);
     if(!level_has_characteristic(level, characteristic))
       return nullptr;
     return characteristic;
@@ -333,7 +370,6 @@ namespace endless {
       return ret;
     }
     add_characteristic(playlist_characteristic);
-    add_characteristic(get_default_characteristic_for_level(level, characteristics));
     for(auto characteristic : characteristics) {
       if(characteristic == nullptr || characteristic->_serializedName == "MissingCharacteristic")
         continue;
@@ -342,16 +378,49 @@ namespace endless {
     return ret;
   }
 
-  static std::optional<LevelParams> resolve_level_params(GlobalNamespace::BeatmapLevel *level, PlaylistCore::BPSong *playlist_song, std::optional<GlobalNamespace::BeatmapDifficulty> selected_difficulty, GlobalNamespace::BeatmapCharacteristicSO *selected_characteristic, std::vector<GlobalNamespace::BeatmapCharacteristicSO *> const& characteristics) {
+  static void prioritize_default_characteristic(std::vector<GlobalNamespace::BeatmapCharacteristicSO *>& characteristic_priority, GlobalNamespace::BeatmapCharacteristicSO *playlist_characteristic, GlobalNamespace::BeatmapCharacteristicSO *default_characteristic) {
+    if(default_characteristic == nullptr)
+      return;
+    int playlist_index = -1;
+    int default_index = -1;
+    for(int i = 0; i < characteristic_priority.size(); i++) {
+      if(playlist_index == -1 && characteristic_priority[i] == playlist_characteristic)
+        playlist_index = i;
+      if(default_index == -1 && characteristic_priority[i] == default_characteristic)
+        default_index = i;
+    }
+    int default_target_index = 0;
+    if(playlist_characteristic != nullptr && playlist_index == 0 && default_characteristic != playlist_characteristic)
+      default_target_index = 1;
+    if(default_index == -1) {
+      if(default_target_index > characteristic_priority.size())
+        default_target_index = characteristic_priority.size();
+      characteristic_priority.insert(characteristic_priority.begin()+default_target_index, default_characteristic);
+      return;
+    }
+    if(default_index == default_target_index)
+      return;
+    auto default_item = characteristic_priority[default_index];
+    characteristic_priority.erase(characteristic_priority.begin()+default_index);
+    if(default_index < default_target_index)
+      default_target_index--;
+    characteristic_priority.insert(characteristic_priority.begin()+default_target_index, default_item);
+  }
+
+  static std::optional<LevelParams> resolve_level_params(GlobalNamespace::BeatmapLevel *level, PlaylistCore::BPSong *playlist_song, std::optional<GlobalNamespace::BeatmapDifficulty> selected_difficulty, GlobalNamespace::BeatmapCharacteristicSO *selected_characteristic, GlobalNamespace::BeatmapCharacteristicSO *standard_characteristic, std::vector<GlobalNamespace::BeatmapCharacteristicSO *> const& characteristics, std::unordered_map<std::string, GlobalNamespace::BeatmapCharacteristicSO *> const& characteristic_lookup) {
     if(level == nullptr)
       return std::nullopt;
     auto playlist_song_difficulty = get_playlist_song_difficulty(playlist_song);
     GlobalNamespace::BeatmapCharacteristicSO *playlist_characteristic = nullptr;
     if(playlist_song_difficulty.has_value())
-      playlist_characteristic = get_valid_characteristic_for_level(level, playlist_song_difficulty->characteristic);
+      playlist_characteristic = get_valid_characteristic_for_level(level, characteristic_lookup, playlist_song_difficulty->characteristic);
     if(playlist_characteristic == nullptr)
-      playlist_characteristic = get_valid_characteristic_for_level(level, get_playlist_song_characteristic_name(playlist_song));
+      playlist_characteristic = get_valid_characteristic_for_level(level, characteristic_lookup, get_playlist_song_characteristic_name(playlist_song));
     auto characteristic_priority = get_characteristic_priority(level, selected_characteristic, playlist_characteristic, characteristics);
+    if(selected_characteristic == nullptr) {
+      auto default_characteristic = get_default_characteristic_for_level(level, standard_characteristic, characteristics);
+      prioritize_default_characteristic(characteristic_priority, playlist_characteristic, default_characteristic);
+    }
     if(characteristic_priority.size() == 0)
       return std::nullopt;
     auto resolved_difficulty = selected_difficulty;
@@ -369,7 +438,7 @@ namespace endless {
     return std::nullopt;
   }
 
-  static bool level_passes_mod_filters(LevelParams level_params, double min_nps, double max_nps) {
+  static bool level_passes_mod_filters(LevelParams level_params, bool requires_mod_presence_filter, std::string const& noodle_allow_state, std::string const& chroma_allow_state) {
     // make sure combination exists
     auto data = level_params.level->GetDifficultyBeatmapData(level_params.characteristic, level_params.difficulty);
     if(data == nullptr)
@@ -395,34 +464,213 @@ namespace endless {
           for(std::string requirement : bcdbd.value().get().requirements) {
             if(!SongCore::API::Capabilities::IsCapabilityRegistered(requirement))
               return false;
-            if(requirement == "Noodle Extensions")
-              has_noodle = true;
-            else if(requirement == "Chroma")
-              has_chroma = true;
+            if(requires_mod_presence_filter) {
+              if(requirement == "Noodle Extensions")
+                has_noodle = true;
+              else if(requirement == "Chroma")
+                has_chroma = true;
+            }
           }
-          for(std::string suggestion : bcdbd.value().get().suggestions) {
-            if(suggestion == "Noodle Extensions")
-              has_noodle = true;
-            else if(suggestion == "Chroma")
-              has_chroma = true;
+          if(requires_mod_presence_filter) {
+            for(std::string suggestion : bcdbd.value().get().suggestions) {
+              if(suggestion == "Noodle Extensions")
+                has_noodle = true;
+              else if(suggestion == "Chroma")
+                has_chroma = true;
+            }
           }
         }
       }
     }
-    auto is_fine = [](bool has_mod, std::string allow_state) -> bool {
-      if(allow_state == "Forbidden")
-        return !has_mod;
-      if(allow_state == "Required")
-        return has_mod;
+    if(!requires_mod_presence_filter)
       return true;
-    };
-    if(!is_fine(has_noodle, getModConfig().noodle_extensions.GetValue()))
+    if(!mod_allow_state_matches(has_noodle, noodle_allow_state))
       return false;
-    if(!is_fine(has_chroma, getModConfig().chroma.GetValue()))
+    if(!mod_allow_state_matches(has_chroma, chroma_allow_state))
       return false;
     return true;
   }
-	
+
+  struct LevelCalculationContext {
+    bool automatic = false;
+    std::size_t index = 0;
+    std::optional<GlobalNamespace::BeatmapDifficulty> selected_difficulty = std::nullopt;
+    GlobalNamespace::BeatmapCharacteristicSO *selected_characteristic = nullptr;
+    GlobalNamespace::BeatmapCharacteristicSO *standard_characteristic = nullptr;
+    std::string noodle_allow_state = "Allowed";
+    std::string chroma_allow_state = "Allowed";
+    bool requires_mod_presence_filter = false;
+    std::vector<GlobalNamespace::BeatmapCharacteristicSO *> characteristics;
+    std::unordered_map<std::string, GlobalNamespace::BeatmapCharacteristicSO *> characteristic_lookup;
+    std::unordered_map<std::string, PlaylistCore::BPSong *> playlist_song_lookup;
+    PlaylistCore::Playlist *playlist = nullptr;
+    std::size_t playlist_song_lookup_index = 0;
+    std::size_t playlist_level_copy_index = 0;
+    bool source_levels_ready = false;
+    bool initialization_complete = false;
+    bool pending_level_resolved = false;
+    std::optional<LevelParams> pending_level_params = std::nullopt;
+    std::vector<GlobalNamespace::BeatmapLevel *> automatic_levels;
+    std::vector<PlaysetBeatmap> playset_beatmaps;
+  };
+
+  static bool is_budget_exhausted(std::chrono::steady_clock::time_point chunk_start, int64_t budget_ms) {
+    if(budget_ms < 0)
+      return false;
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-chunk_start).count() >= budget_ms;
+  }
+
+  static bool initialize_level_calculation(LevelCalculationContext& context, bool automatic) {
+    context = { };
+    context.automatic = automatic;
+    if(!SongCore::API::Loading::AreSongsLoaded())
+      return false;
+    if(context.automatic) {
+      auto difficulty_setting = getModConfig().difficulty.GetValue();
+      auto characteristic_setting = getModConfig().characteristic.GetValue();
+      context.noodle_allow_state = getModConfig().noodle_extensions.GetValue();
+      context.chroma_allow_state = getModConfig().chroma.GetValue();
+      context.requires_mod_presence_filter = context.noodle_allow_state != "Allowed" || context.chroma_allow_state != "Allowed";
+      context.selected_difficulty = difficulty_setting == "Any" ? std::nullopt : std::optional(string_to_difficulty(difficulty_setting));
+      context.characteristics = get_characteristics();
+      context.characteristic_lookup = build_characteristic_lookup(context.characteristics);
+      context.standard_characteristic = find_characteristic_from_lookup(context.characteristic_lookup, "Standard");
+      if(characteristic_setting != "Any") {
+        context.selected_characteristic = find_characteristic_from_lookup(context.characteristic_lookup, characteristic_setting);
+        if(context.selected_characteristic == nullptr) {
+          PaperLogger.warn("selected_characteristic is null.");
+          return false;
+        }
+      }
+      context.playlist = selected_playlist;
+      if(context.playlist != nullptr && context.playlist->playlistCS != nullptr)
+        context.automatic_levels.reserve(context.playlist->playlistCS->beatmapLevels.size());
+      if(context.playlist != nullptr)
+        context.playlist_song_lookup.reserve(context.playlist->playlistJSON.Songs.size());
+    } else {
+      if(selected_playset == -1)
+        return false;
+      auto playsets = getModConfig().playsets.GetValue();
+      if(selected_playset < 0 || static_cast<std::size_t>(selected_playset) >= playsets.size())
+        return false;
+      context.playset_beatmaps = playsets[selected_playset].beatmaps;
+    }
+    return true;
+  }
+
+  static bool process_initialization_chunk(LevelCalculationContext& context, int64_t budget_ms) {
+    if(context.initialization_complete)
+      return true;
+    if(!context.automatic) {
+      context.initialization_complete = true;
+      return true;
+    }
+    auto chunk_start = std::chrono::steady_clock::now();
+    if(context.playlist == nullptr && !context.source_levels_ready) {
+      auto all_levels = SongCore::API::Loading::GetAllLevels();
+      if(context.automatic_levels.capacity() == 0)
+        context.automatic_levels.reserve(all_levels.size());
+      while(context.playlist_level_copy_index < all_levels.size()) {
+        context.automatic_levels.push_back(all_levels[context.playlist_level_copy_index++]);
+        if(is_budget_exhausted(chunk_start, budget_ms))
+          return false;
+      }
+      context.source_levels_ready = true;
+    }
+    if(context.playlist != nullptr) {
+      while(context.playlist_song_lookup_index < context.playlist->playlistJSON.Songs.size()) {
+        auto &song = context.playlist->playlistJSON.Songs[context.playlist_song_lookup_index++];
+        context.playlist_song_lookup[normalize_level_id(song.LevelID)] = &song;
+        if(is_budget_exhausted(chunk_start, budget_ms))
+          return false;
+      }
+      if(!context.source_levels_ready) {
+        if(context.playlist->playlistCS == nullptr) {
+          context.source_levels_ready = true;
+        } else {
+          while(context.playlist_level_copy_index < context.playlist->playlistCS->beatmapLevels.size()) {
+            context.automatic_levels.push_back(context.playlist->playlistCS->beatmapLevels[context.playlist_level_copy_index++]);
+            if(is_budget_exhausted(chunk_start, budget_ms))
+              return false;
+          }
+          context.source_levels_ready = true;
+        }
+      }
+    }
+    context.initialization_complete = true;
+    return true;
+  }
+
+  static bool process_level_calculation_chunk(LevelCalculationContext& context, std::vector<LevelParams>& out_levels, int64_t budget_ms) {
+    if(!process_initialization_chunk(context, budget_ms))
+      return false;
+    auto chunk_start = std::chrono::steady_clock::now();
+    if(context.automatic) {
+      while(context.index < context.automatic_levels.size()) {
+        if(is_budget_exhausted(chunk_start, budget_ms))
+          return false;
+        if(!context.pending_level_resolved) {
+          auto level = context.automatic_levels[context.index];
+          auto playlist_song = find_playlist_song_for_level(context.playlist_song_lookup, level);
+          context.pending_level_params = resolve_level_params(level, playlist_song, context.selected_difficulty, context.selected_characteristic, context.standard_characteristic, context.characteristics, context.characteristic_lookup);
+          context.pending_level_resolved = true;
+          if(is_budget_exhausted(chunk_start, budget_ms))
+            return false;
+        }
+        if(context.pending_level_params.has_value()) {
+          if(is_budget_exhausted(chunk_start, budget_ms))
+            return false;
+          if(level_passes_mod_filters(context.pending_level_params.value(), context.requires_mod_presence_filter, context.noodle_allow_state, context.chroma_allow_state))
+            out_levels.push_back(context.pending_level_params.value());
+        }
+        context.pending_level_params = std::nullopt;
+        context.pending_level_resolved = false;
+        context.index++;
+        if(is_budget_exhausted(chunk_start, budget_ms))
+          return false;
+      }
+      return true;
+    }
+    while(context.index < context.playset_beatmaps.size()) {
+      if(is_budget_exhausted(chunk_start, budget_ms))
+        return false;
+      auto lp = LevelParams::from_playset_beatmap(context.playset_beatmaps[context.index]);
+      if(lp)
+        out_levels.push_back(lp.value());
+      else
+        PaperLogger.warn("Found invalid level in playset.");
+      context.index++;
+      if(is_budget_exhausted(chunk_start, budget_ms))
+        return false;
+    }
+    return true;
+  }
+
+  static bool process_shuffle_chunk(std::vector<LevelParams>& levels, std::size_t& shuffle_index, int64_t budget_ms) {
+    auto chunk_start = std::chrono::steady_clock::now();
+    while(shuffle_index > 1) {
+      if(is_budget_exhausted(chunk_start, budget_ms))
+        return false;
+      shuffle_index--;
+      std::uniform_int_distribution<std::size_t> distribution(0, shuffle_index);
+      std::size_t swap_index = distribution(get_random_engine());
+      if(swap_index != shuffle_index)
+        std::swap(levels[shuffle_index], levels[swap_index]);
+      if(is_budget_exhausted(chunk_start, budget_ms))
+        return false;
+    }
+    return true;
+  }
+
+  static void finalize_level_calculation(std::chrono::steady_clock::time_point calculation_start, bool should_shuffle) {
+    if(should_shuffle && !getModConfig().sequential.GetValue())
+      std::shuffle(state.levels.begin(), state.levels.end(), get_random_engine());
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-calculation_start).count();
+    PaperLogger.info("Calculated {} levels in {} ms.", state.levels.size(), elapsed_ms);
+  }
+
+  static bool menu_start_calculation_in_progress = false;
+
 	// coroutine to update the time text
 	static custom_types::Helpers::Coroutine update_time_coroutine() {
 		while(true) {
@@ -462,61 +710,49 @@ namespace endless {
 		return true;
 	}
 
-	void calculate_levels(bool automatic) {
-		PaperLogger.info("Calculating levels...");
-		state.levels = {};
-		if(!SongCore::API::Loading::AreSongsLoaded())
-			return;
-		if(automatic) {
-			// get info
-			auto min_nps = getModConfig().min_nps.GetValue();
-			auto max_nps = getModConfig().max_nps.GetValue();
-      auto selected_difficulty = getModConfig().difficulty.GetValue() == "Any" ? std::nullopt : std::optional(string_to_difficulty(getModConfig().difficulty.GetValue()));
-      GlobalNamespace::BeatmapCharacteristicSO *selected_characteristic = nullptr;
-      if(getModConfig().characteristic.GetValue() != "Any") {
-        selected_characteristic = get_characteristic(getModConfig().characteristic.GetValue());
-        RETURN_IF_NULL(selected_characteristic,);
-      }
-      auto characteristics = get_characteristics();
-			// get levels in the selected playlist
-			std::vector<GlobalNamespace::BeatmapLevel *> levels;
-			if(selected_playlist == nullptr)
-				for(auto level : SongCore::API::Loading::GetAllLevels())
-					levels.push_back(level);
-			else {
-				for(auto level : selected_playlist->playlistCS->beatmapLevels)
-					levels.push_back(level);
-			}
-      for(auto level : levels) {
-        auto playlist_song = find_playlist_song_for_level(selected_playlist, level);
-        auto level_params = resolve_level_params(level, playlist_song, std::nullopt, nullptr, characteristics);
-        if(!level_params.has_value())
-          continue;
-        if(selected_difficulty.has_value() && level_params->difficulty != selected_difficulty.value())
-          continue;
-        if(selected_characteristic != nullptr && level_params->characteristic->_serializedName != selected_characteristic->_serializedName)
-          continue;
-        if(!level_passes_mod_filters(level_params.value(), min_nps, max_nps))
-          continue;
-        state.levels.push_back(level_params.value());
-      }
-		} else {
-			// playset
-			if(selected_playset == -1)
-				return;
-			auto beatmaps = getModConfig().playsets.GetValue()[selected_playset].beatmaps;
-			for(auto pbm : beatmaps) {
-				auto lp = LevelParams::from_playset_beatmap(pbm);
-				if(lp)
-					state.levels.push_back(lp.value());
-				else
-					PaperLogger.warn("Found invalid level in playset.");
-			}
-		}
-		// shuffle
-		if(!getModConfig().sequential.GetValue())
-			std::shuffle(state.levels.begin(), state.levels.end(), std::default_random_engine { std::random_device {}() });
-	}
+  void calculate_levels(bool automatic) {
+    PaperLogger.info("Calculating levels...");
+    auto calculation_start = std::chrono::steady_clock::now();
+    state.levels = {};
+    LevelCalculationContext context;
+    if(!initialize_level_calculation(context, automatic))
+      return;
+    process_level_calculation_chunk(context, state.levels, -1);
+    finalize_level_calculation(calculation_start, true);
+  }
+
+  static custom_types::Helpers::Coroutine start_endless_from_menu_coroutine(bool automatic) {
+    co_yield nullptr;
+    PaperLogger.info("Calculating levels...");
+    auto calculation_start = std::chrono::steady_clock::now();
+    state.levels = {};
+    LevelCalculationContext context;
+    if(!initialize_level_calculation(context, automatic)) {
+      menu_start_calculation_in_progress = false;
+      co_return;
+    }
+    while(!process_level_calculation_chunk(context, state.levels, 4))
+      co_yield nullptr;
+    if(!getModConfig().sequential.GetValue()) {
+      std::size_t shuffle_index = state.levels.size();
+      while(!process_shuffle_chunk(state.levels, shuffle_index, 4))
+        co_yield nullptr;
+    }
+    finalize_level_calculation(calculation_start, false);
+    menu_start_calculation_in_progress = false;
+    start_endless();
+  }
+
+  void start_endless_from_menu(bool automatic) {
+    if(menu_start_calculation_in_progress) {
+      PaperLogger.warn("Start ignored because calculation is already in progress.");
+      return;
+    }
+    auto mth = UnityEngine::Object::FindObjectOfType<GlobalNamespace::MenuTransitionsHelper *>();
+    RETURN_IF_NULL(mth,);
+    menu_start_calculation_in_progress = true;
+    mth->StartCoroutine(custom_types::Helpers::CoroutineHelper::New(start_endless_from_menu_coroutine(automatic)));
+  }
 
 	void start_endless(void) {
 		// start endless
@@ -559,7 +795,7 @@ namespace endless {
 			if(getModConfig().end_after_all.GetValue())
 				return std::nullopt;
 			if(!getModConfig().sequential.GetValue())
-				std::shuffle(state.levels.begin(), state.levels.end(), std::default_random_engine { std::random_device {}() });
+        std::shuffle(state.levels.begin(), state.levels.end(), get_random_engine());
 			state.level_index = 0;
 		}
 		return state.levels[state.level_index++];

@@ -29,10 +29,12 @@ namespace endless {
 		std::vector<LevelParams> levels;
 	};
 	extern State state;
-	// calculates levels
-	void calculate_levels(bool automatic);
-	// starts endless mode
-	void start_endless(void);
+    // calculates levels
+    void calculate_levels(bool automatic);
+    // calculates levels in chunks and starts endless mode from menu context
+    void start_endless_from_menu(bool automatic);
+    // starts endless mode
+    void start_endless(void);
 	// starts the next level in endless mode. Returns whether it actually started
 	bool next_level(void);
 	// Updates the score text with the current score on the map currently being played

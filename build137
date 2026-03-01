@@ -1,0 +1,446 @@
+#!/usr/bin/env bash
+#
+# Build endless-qmod for Beat Saber 1.37.0 on macOS.
+# Usage:
+#   ./buildqmod137
+#   ./buildqmod137 --no-clean
+#   ./buildqmod137 --deploy
+#   ./buildqmod137 --restore
+#   ./buildqmod137 CustomName
+
+set -euo pipefail
+backup_root='/tmp/buildqmod137-endless-backup'
+
+die() {
+  echo "Error: $*" >&2
+  exit 1
+}
+
+install_qpm_to_home_bin() {
+  local qpm_target_dir="$HOME/bin/macos"
+  local qpm_target="$qpm_target_dir/qpm"
+  local qpm_zip_url='https://github.com/QuestPackageManager/QPM.CLI/releases/latest/download/qpm-macos-universal.zip'
+  local tmp_dir=''
+  local zip_file=''
+  local extract_dir=''
+
+  if [[ -x "$qpm_target" ]]; then
+    echo "$qpm_target"
+    return 0
+  fi
+
+  mkdir -p "$qpm_target_dir"
+
+  tmp_dir="$(mktemp -d /tmp/qpm-install.XXXXXX)"
+  zip_file="$tmp_dir/qpm-macos-universal.zip"
+  extract_dir="$tmp_dir/extract"
+
+  curl -fL "$qpm_zip_url" -o "$zip_file"
+  mkdir -p "$extract_dir"
+  unzip -o "$zip_file" -d "$extract_dir" >/dev/null
+  [[ -f "$extract_dir/qpm" ]] || die "qpm binary missing in downloaded archive."
+
+  mv "$extract_dir/qpm" "$qpm_target"
+  chmod +x "$qpm_target"
+  rm -rf "$tmp_dir"
+
+  echo "$qpm_target"
+}
+
+find_cmd() {
+  local name="$1"
+  shift
+
+  if command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+    return 0
+  fi
+
+  local candidate
+  for candidate in "$@"; do
+    if [[ -x "$candidate" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+find_mod_repo_dir() {
+  local candidate=''
+
+  for candidate in "$@"; do
+    if [[ -n "$candidate" ]] && [[ -f "$candidate/scripts/build.ps1" ]] && [[ -f "$candidate/scripts/createqmod.ps1" ]] && [[ -f "$candidate/qpm.json" ]]; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+pick_latest_ndk() {
+  local base="$1"
+  local latest=''
+  local dir=''
+
+  [[ -d "$base" ]] || return 1
+
+  while IFS= read -r dir; do
+    if [[ -f "$dir/build/cmake/android.toolchain.cmake" ]]; then
+      latest="$dir"
+    fi
+  done < <(find "$base" -mindepth 1 -maxdepth 1 -type d | sort)
+
+  [[ -n "$latest" ]] || return 1
+  echo "$latest"
+}
+
+show_help() {
+  cat <<'EOF'
+Build endless-qmod for Beat Saber 1.37.0 on macOS.
+
+Usage:
+  ./buildqmod137 [--no-clean] [--deploy] [--restore] [qmod_name]
+
+Examples:
+  ./buildqmod137
+  ./buildqmod137 --no-clean
+  ./buildqmod137 --deploy
+  ./buildqmod137 --restore
+  ./buildqmod137 Endless
+EOF
+}
+
+extract_json_string() {
+  local key="$1"
+  local file="$2"
+
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" | head -n 1
+}
+
+read_meta_value() {
+  local key="$1"
+  local file="$2"
+
+  sed -n "s/^$key=//p" "$file" | head -n 1
+}
+
+backup_qmod_from_quest() {
+  local adb_bin="$1"
+  local package_version="$2"
+  local mod_id="$3"
+  local mod_file="$4"
+  local backup_base_dir="$5"
+  local package_root="/sdcard/ModData/com.beatgames.beatsaber/Packages/$package_version"
+  local modloader_root='/sdcard/ModData/com.beatgames.beatsaber/Modloader'
+  local config_root='/sdcard/ModData/com.beatgames.beatsaber/Configs'
+  local backup_dir=''
+  local package_dir_count='0'
+  local has_early_mod='0'
+  local has_late_mod='0'
+  local has_config='0'
+  local remote_path=''
+  local meta_file=''
+
+  mkdir -p "$backup_base_dir"
+  backup_dir="$backup_base_dir/${mod_id}-$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$backup_dir/packages" "$backup_dir/modloader/early_mods" "$backup_dir/modloader/mods" "$backup_dir/configs"
+
+  while IFS= read -r remote_path; do
+    [[ -n "$remote_path" ]] || continue
+    "$adb_bin" pull "$remote_path" "$backup_dir/packages/" >/dev/null
+    package_dir_count="$((package_dir_count + 1))"
+  done < <("$adb_bin" shell "if [ -d '$package_root' ]; then find '$package_root' -maxdepth 1 -type d -name '${mod_id}_v*' -print; fi" | tr -d '\r' | sed '/^$/d')
+
+  if "$adb_bin" shell "[ -f '$modloader_root/early_mods/$mod_file' ]" >/dev/null 2>&1; then
+    "$adb_bin" pull "$modloader_root/early_mods/$mod_file" "$backup_dir/modloader/early_mods/$mod_file" >/dev/null
+    has_early_mod='1'
+  fi
+  if "$adb_bin" shell "[ -f '$modloader_root/mods/$mod_file' ]" >/dev/null 2>&1; then
+    "$adb_bin" pull "$modloader_root/mods/$mod_file" "$backup_dir/modloader/mods/$mod_file" >/dev/null
+    has_late_mod='1'
+  fi
+  if "$adb_bin" shell "[ -f '$config_root/$mod_id.json' ]" >/dev/null 2>&1; then
+    "$adb_bin" pull "$config_root/$mod_id.json" "$backup_dir/configs/$mod_id.json" >/dev/null
+    has_config='1'
+  fi
+
+  meta_file="$backup_dir/meta.env"
+  {
+    echo "package_version=$package_version"
+    echo "mod_id=$mod_id"
+    echo "mod_file=$mod_file"
+    echo "package_dir_count=$package_dir_count"
+    echo "has_early_mod=$has_early_mod"
+    echo "has_late_mod=$has_late_mod"
+    echo "has_config=$has_config"
+    echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$meta_file"
+
+  printf '%s\n' "$backup_dir" > "$backup_base_dir/latest_path"
+  echo "$backup_dir"
+}
+
+restore_qmod_from_backup() {
+  local adb_bin="$1"
+  local backup_base_dir="$2"
+  local backup_dir=''
+  local meta_file=''
+  local package_version=''
+  local mod_id=''
+  local mod_file=''
+  local package_dir_count_expected='0'
+  local has_early_mod='0'
+  local has_late_mod='0'
+  local has_config='0'
+  local package_root=''
+  local modloader_root='/sdcard/ModData/com.beatgames.beatsaber/Modloader'
+  local config_root='/sdcard/ModData/com.beatgames.beatsaber/Configs'
+  local package_dir=''
+  local package_dir_count_actual=''
+
+  [[ -f "$backup_base_dir/latest_path" ]] || die "No backup metadata found at $backup_base_dir/latest_path. Run --deploy once first."
+  backup_dir="$(cat "$backup_base_dir/latest_path")"
+  [[ -d "$backup_dir" ]] || die "Backup directory not found: $backup_dir"
+
+  meta_file="$backup_dir/meta.env"
+  [[ -f "$meta_file" ]] || die "Backup metadata missing: $meta_file"
+
+  package_version="$(read_meta_value 'package_version' "$meta_file")"
+  mod_id="$(read_meta_value 'mod_id' "$meta_file")"
+  mod_file="$(read_meta_value 'mod_file' "$meta_file")"
+  package_dir_count_expected="$(read_meta_value 'package_dir_count' "$meta_file")"
+  has_early_mod="$(read_meta_value 'has_early_mod' "$meta_file")"
+  has_late_mod="$(read_meta_value 'has_late_mod' "$meta_file")"
+  has_config="$(read_meta_value 'has_config' "$meta_file")"
+
+  [[ -n "$package_version" ]] || die "Invalid backup metadata: package_version missing."
+  [[ -n "$mod_id" ]] || die "Invalid backup metadata: mod_id missing."
+  [[ -n "$mod_file" ]] || die "Invalid backup metadata: mod_file missing."
+  [[ -n "$package_dir_count_expected" ]] || package_dir_count_expected='0'
+  [[ -n "$has_early_mod" ]] || has_early_mod='0'
+  [[ -n "$has_late_mod" ]] || has_late_mod='0'
+  [[ -n "$has_config" ]] || has_config='0'
+
+  package_root="/sdcard/ModData/com.beatgames.beatsaber/Packages/$package_version"
+
+  "$adb_bin" get-state >/dev/null 2>&1 || die "No adb device in 'device' state."
+  "$adb_bin" shell am force-stop com.beatgames.beatsaber >/dev/null 2>&1 || true
+
+  "$adb_bin" shell "mkdir -p '$package_root' '$modloader_root/early_mods' '$modloader_root/mods' '$config_root'"
+  "$adb_bin" shell "find '$package_root' -maxdepth 1 -type d -name '${mod_id}_v*' -exec rm -rf {} +"
+  "$adb_bin" shell "rm -f '$modloader_root/early_mods/$mod_file' '$modloader_root/mods/$mod_file' '$config_root/$mod_id.json'"
+
+  while IFS= read -r package_dir; do
+    [[ -n "$package_dir" ]] || continue
+    "$adb_bin" push "$package_dir" "$package_root/" >/dev/null
+  done < <(find "$backup_dir/packages" -mindepth 1 -maxdepth 1 -type d | sort)
+
+  if [[ -f "$backup_dir/modloader/early_mods/$mod_file" ]]; then
+    "$adb_bin" push "$backup_dir/modloader/early_mods/$mod_file" "$modloader_root/early_mods/$mod_file" >/dev/null
+  fi
+  if [[ -f "$backup_dir/modloader/mods/$mod_file" ]]; then
+    "$adb_bin" push "$backup_dir/modloader/mods/$mod_file" "$modloader_root/mods/$mod_file" >/dev/null
+  fi
+  if [[ -f "$backup_dir/configs/$mod_id.json" ]]; then
+    "$adb_bin" push "$backup_dir/configs/$mod_id.json" "$config_root/$mod_id.json" >/dev/null
+  fi
+
+  package_dir_count_actual="$("$adb_bin" shell "find '$package_root' -maxdepth 1 -type d -name '${mod_id}_v*' | wc -l" | tr -d '\r[:space:]')"
+  [[ "$package_dir_count_actual" == "$package_dir_count_expected" ]] || die "Restore verification failed: expected $package_dir_count_expected package dir(s), found $package_dir_count_actual."
+
+  if [[ "$has_early_mod" == '1' ]]; then
+    "$adb_bin" shell "[ -f '$modloader_root/early_mods/$mod_file' ]" >/dev/null 2>&1 || die "Restore verification failed: missing early mod file."
+  fi
+  if [[ "$has_late_mod" == '1' ]]; then
+    "$adb_bin" shell "[ -f '$modloader_root/mods/$mod_file' ]" >/dev/null 2>&1 || die "Restore verification failed: missing late mod file."
+  fi
+  if [[ "$has_config" == '1' ]]; then
+    "$adb_bin" shell "[ -f '$config_root/$mod_id.json' ]" >/dev/null 2>&1 || die "Restore verification failed: missing config file."
+  fi
+
+  echo "Restore done from backup: $backup_dir"
+  echo "Restored package root: $package_root"
+}
+
+deploy_qmod_to_quest() {
+  local adb_bin="$1"
+  local qmod_path="$2"
+  local package_version="$3"
+  local mod_id="$4"
+  local mod_version="$5"
+  local backup_base_dir="$6"
+  local mod_file='libendless.so'
+  local package_root="/sdcard/ModData/com.beatgames.beatsaber/Packages/$package_version"
+  local modloader_root='/sdcard/ModData/com.beatgames.beatsaber/Modloader'
+  local package_dir="${mod_id}_v${mod_version}"
+  local stage_root=''
+  local stage_package=''
+  local installed_count=''
+  local backup_dir=''
+
+  [[ -f "$qmod_path" ]] || die "QMOD file not found: $qmod_path"
+
+  stage_root="$(mktemp -d /tmp/${mod_id}-deploy.XXXXXX)"
+  stage_package="$stage_root/$package_dir"
+  mkdir -p "$stage_package"
+  unzip -oq "$qmod_path" -d "$stage_package"
+
+  [[ -f "$stage_package/$mod_file" ]] || die "Expected $mod_file in $qmod_path"
+
+  "$adb_bin" get-state >/dev/null 2>&1 || die "No adb device in 'device' state."
+  "$adb_bin" shell am force-stop com.beatgames.beatsaber >/dev/null 2>&1 || true
+
+  backup_dir="$(backup_qmod_from_quest "$adb_bin" "$package_version" "$mod_id" "$mod_file" "$backup_base_dir")"
+  echo "Backup saved: $backup_dir"
+
+  "$adb_bin" shell "mkdir -p '$package_root' '$modloader_root/early_mods' '$modloader_root/mods'"
+  "$adb_bin" shell "find '$package_root' -maxdepth 1 -type d -name '${mod_id}_v*' -exec rm -rf {} +"
+  "$adb_bin" shell "rm -f '$modloader_root/early_mods/$mod_file' '$modloader_root/mods/$mod_file'"
+
+  "$adb_bin" push "$stage_package" "$package_root/" >/dev/null
+  "$adb_bin" push "$stage_package/$mod_file" "$modloader_root/early_mods/$mod_file" >/dev/null
+
+  installed_count="$("$adb_bin" shell "find '$package_root' -maxdepth 1 -type d -name '${mod_id}_v*' | wc -l" | tr -d '\r[:space:]')"
+  rm -rf "$stage_root"
+
+  [[ "$installed_count" == '1' ]] || die "Deploy verification failed: expected 1 installed package for '$mod_id', got '$installed_count'."
+
+  echo "Deploy done."
+  echo "Installed package: $package_root/$package_dir"
+  echo "Active library: $modloader_root/early_mods/$mod_file"
+}
+
+clean_arg='-clean'
+qmod_name='Endless'
+deploy='false'
+restore='false'
+
+while (($# > 0)); do
+  case "$1" in
+    -h|--help)
+      show_help
+      exit 0
+      ;;
+    --no-clean)
+      clean_arg=''
+      ;;
+    --deploy)
+      deploy='true'
+      ;;
+    --restore)
+      restore='true'
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      qmod_name="$1"
+      ;;
+  esac
+  shift
+done
+
+if [[ "$deploy" == 'true' && "$restore" == 'true' ]]; then
+  die "Use either --deploy or --restore, not both."
+fi
+
+if [[ "$restore" == 'true' ]]; then
+  adb_bin="$(find_cmd adb /opt/homebrew/bin/adb /usr/local/bin/adb)" || die "adb not found. Install android-platform-tools first."
+  echo "Restoring Endless from latest backup..."
+  restore_qmod_from_backup "$adb_bin" "$backup_root"
+  echo "Done."
+  exit 0
+fi
+
+invoke_dir="$(cd "$(dirname "$0")" && pwd)"
+mod_dir="$(find_mod_repo_dir "$PWD" "$invoke_dir" "$HOME/repo/endless-qmod")" || die "Could not find endless-qmod repo directory."
+cd "$mod_dir"
+
+qpm_bin="$(install_qpm_to_home_bin)"
+pwsh_bin="$(find_cmd pwsh /usr/local/bin/pwsh /opt/homebrew/bin/pwsh)" || die "pwsh not found. Install PowerShell first."
+cmake_bin="$(find_cmd cmake /opt/homebrew/bin/cmake /usr/local/bin/cmake)" || die "cmake not found."
+ninja_bin="$(find_cmd ninja /opt/homebrew/bin/ninja /usr/local/bin/ninja)" || die "ninja not found."
+
+export PATH="$(dirname "$qpm_bin"):$(dirname "$pwsh_bin"):$(dirname "$cmake_bin"):$(dirname "$ninja_bin"):$PATH"
+
+if [[ ! -f ./scripts/build.ps1 ]]; then
+  die "scripts/build.ps1 not found."
+fi
+
+if [[ ! -f ./scripts/createqmod.ps1 ]]; then
+  die "scripts/createqmod.ps1 not found."
+fi
+
+metadata_file='./mod.json'
+if [[ ! -f "$metadata_file" ]]; then
+  metadata_file='./mod.template.json'
+fi
+if [[ ! -f "$metadata_file" ]]; then
+  die "Neither mod.json nor mod.template.json was found."
+fi
+
+expected_version_prefix='1.37.0'
+actual_version="$(sed -n 's/.*"packageVersion"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$metadata_file" | head -n 1)"
+if [[ "$actual_version" != "${expected_version_prefix}"* ]]; then
+  die "$metadata_file packageVersion is '$actual_version' (expected prefix '$expected_version_prefix')."
+fi
+mod_id="$(extract_json_string 'id' "$metadata_file")"
+mod_version="$(extract_json_string 'version' "$metadata_file")"
+
+[[ -n "$mod_id" ]] || die "Could not parse mod id from $metadata_file."
+[[ -n "$mod_version" ]] || die "Could not parse mod version from $metadata_file."
+
+ndk_dir=''
+if [[ -n "${ANDROID_NDK_HOME:-}" && -f "${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" ]]; then
+  ndk_dir="$ANDROID_NDK_HOME"
+fi
+
+if [[ -z "$ndk_dir" ]]; then
+  ndk_dir="$(pick_latest_ndk "$HOME/Library/Android/sdk/ndk" || true)"
+fi
+
+if [[ -z "$ndk_dir" ]]; then
+  ndk_dir="$(pick_latest_ndk "$HOME/Library/Application Support/QPM-RS/ndk" || true)"
+fi
+
+if [[ -z "$ndk_dir" ]]; then
+  echo "No usable NDK found locally. Downloading NDK 27 via qpm..."
+  "$qpm_bin" ndk download 27
+  ndk_dir="$(pick_latest_ndk "$HOME/Library/Application Support/QPM-RS/ndk" || true)"
+fi
+
+[[ -n "$ndk_dir" ]] || die "Could not find/download a usable Android NDK."
+[[ -f "$ndk_dir/build/cmake/android.toolchain.cmake" ]] || die "Invalid NDK dir: $ndk_dir"
+
+mkdir -p "$HOME/.ndk"
+ln -sfn "$ndk_dir" "$HOME/.ndk/current"
+export ANDROID_NDK_HOME="$HOME/.ndk/current"
+
+echo "Using NDK: $ANDROID_NDK_HOME"
+echo "Running qpm restore..."
+"$qpm_bin" restore
+
+if [[ -f "$mod_dir/$qmod_name.qmod" || -f "$mod_dir/$qmod_name.zip" ]]; then
+  echo "Cleaning existing qmod artifacts for $qmod_name..."
+  rm -f "$mod_dir/$qmod_name.qmod" "$mod_dir/$qmod_name.zip"
+fi
+
+echo "Building $qmod_name.qmod..."
+if [[ -n "$clean_arg" ]]; then
+  "$pwsh_bin" ./scripts/build.ps1 -clean
+else
+  "$pwsh_bin" ./scripts/build.ps1
+fi
+"$pwsh_bin" ./scripts/createqmod.ps1 "$qmod_name"
+
+if [[ "$deploy" == 'true' ]]; then
+  adb_bin="$(find_cmd adb /opt/homebrew/bin/adb /usr/local/bin/adb)" || die "adb not found. Install android-platform-tools first."
+  echo "Deploying $qmod_name.qmod to Quest..."
+  deploy_qmod_to_quest "$adb_bin" "$mod_dir/$qmod_name.qmod" "$actual_version" "$mod_id" "$mod_version" "$backup_root"
+fi
+
+echo "Done."
+echo "QMOD: $mod_dir/$qmod_name.qmod"

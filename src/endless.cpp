@@ -225,6 +225,21 @@ namespace endless {
     return std::nullopt;
   }
 
+  static GlobalNamespace::BeatmapCharacteristicSO *get_preferred_expertplus_characteristic_for_level(GlobalNamespace::BeatmapLevel *level, GlobalNamespace::BeatmapCharacteristicSO *lawless_characteristic, GlobalNamespace::BeatmapCharacteristicSO *standard_characteristic, std::vector<GlobalNamespace::BeatmapCharacteristicSO *> const& characteristics) {
+    auto expert_plus = GlobalNamespace::BeatmapDifficulty::ExpertPlus;
+    if(level_has_difficulty(level, lawless_characteristic, expert_plus))
+      return lawless_characteristic;
+    if(level_has_difficulty(level, standard_characteristic, expert_plus))
+      return standard_characteristic;
+    for(auto characteristic : characteristics) {
+      if(characteristic == nullptr || characteristic->_serializedName == "MissingCharacteristic")
+        continue;
+      if(level_has_difficulty(level, characteristic, expert_plus))
+        return characteristic;
+    }
+    return nullptr;
+  }
+
   static std::string normalize_difficulty_name(std::string value) {
     std::string normalized;
     normalized.reserve(value.size());
@@ -424,6 +439,18 @@ namespace endless {
     if(characteristic_priority.size() == 0)
       return std::nullopt;
     auto resolved_difficulty = selected_difficulty;
+    bool is_unknown_difficulty = !selected_difficulty.has_value() && !playlist_song_difficulty.has_value();
+    if(is_unknown_difficulty) {
+      if(selected_characteristic != nullptr) {
+        if(level_has_difficulty(level, selected_characteristic, GlobalNamespace::BeatmapDifficulty::ExpertPlus))
+          return LevelParams{level, selected_characteristic, GlobalNamespace::BeatmapDifficulty::ExpertPlus};
+      } else {
+        auto lawless_characteristic = find_characteristic_from_lookup(characteristic_lookup, "Lawless");
+        auto expertplus_characteristic = get_preferred_expertplus_characteristic_for_level(level, lawless_characteristic, standard_characteristic, characteristics);
+        if(expertplus_characteristic != nullptr)
+          return LevelParams{level, expertplus_characteristic, GlobalNamespace::BeatmapDifficulty::ExpertPlus};
+      }
+    }
     if(!resolved_difficulty.has_value() && playlist_song_difficulty.has_value())
       resolved_difficulty = playlist_song_difficulty->difficulty;
     for(auto characteristic : characteristic_priority) {
